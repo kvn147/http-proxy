@@ -1,3 +1,4 @@
+import select
 import socket
 import sys
 import threading
@@ -57,6 +58,14 @@ def handle_connection(client_sock: socket.socket, client_addr: tuple[str, int]) 
             continue
 
         http_request = parse_http_request(parts[0])
+        print(f">>> {http_request.method} {http_request.uri}")
+
+        if http_request.method == "CONNECT":
+            handle_connect(client_sock, http_request.uri)
+            return
+        else:
+            # call non-connect handler here
+            return
 
 
 def parse_http_request(raw: str) -> HttpRequest:
@@ -72,11 +81,54 @@ def parse_http_request(raw: str) -> HttpRequest:
 
     headers = {}
     for header_line in header_lines:
-        key, value = header_line.split(":")
+        key, value = header_line.split(":", 1)
         headers[key] = value
 
     return HttpRequest(method, uri, protocol, headers)
 
+
+def handle_connect(client_sock, target) -> None:
+    """Handle a CONNECT request
+    
+    Args:
+        client_sock: The client socket connected to.
+        target: The target host and port to connect to.
+    """
+    host, port = target.split(":", 1)
+    
+    remote = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        remote.connect((host, int(port)))
+
+        client_sock.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        # establish tunnel
+        tunnel(client_sock, remote)
+    except OSError as error:
+        client_sock.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+    finally:
+        client_sock.close()
+        remote.close()
+
+def tunnel(client_sock, remote) -> None:
+    """Establish a tunnel between the client and the remote server.
+    
+    Args:
+        client_sock: The client socket connected to.
+        remote: The remote socket connected to.
+    """
+    sockets = [client_sock, remote]
+    while True:
+        readable, _, _ = select.select(sockets, [], [])
+
+        for sock in readable:
+            data = sock.recv(BUFFER_SIZE)
+
+            if not data:
+                return
+            if sock is client_sock:
+                remote.sendall(data)
+            else:
+                client_sock.sendall(data)
 
 if __name__ == "__main__":
     run_tcp_server()
