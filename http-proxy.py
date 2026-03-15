@@ -49,31 +49,35 @@ def handle_connection(client_sock: socket.socket, client_addr: tuple[str, int]) 
         buffer += client_sock.recv(BUFFER_SIZE).decode()
 
         # Request line + headers part of a HTTP request will end with \r\n\r\n.
-        parts = buffer.split("\r\n\r\n")
+        raw_request, separator, remaining = buffer.partition("\r\n\r\n")
 
-        # Continue reading from the TCP stream if request line + headers is
-        # not fully formed.
-        if len(parts) <= 1:
+        if not separator:
             continue
 
-        http_request = parse_http_request(parts[0])
+        buffer = remaining
+        http_request = parse_http_request(raw_request)
 
 
-def parse_http_request(raw: str) -> HttpRequest:
+def parse_http_request(raw_request: str) -> HttpRequest:
     """Extracts the parts of a HTTP request from a raw string.
 
     Args:
-        raw: The raw string that contains the HTTP request.
+        raw_request: The raw string that contains the HTTP request.
     """
-    lines = raw.split("\r\n")
-    request_line, header_lines = lines[0], lines[1:]
+    lines = raw_request.splitlines()
+    request_line, *header_lines = lines
 
     method, uri, protocol = request_line.split()
 
     headers = {}
+
     for header_line in header_lines:
-        key, value = header_line.split(":")
-        headers[key] = value
+        key, separator, value = header_line.partition(":")
+
+        if separator:
+            key = key.strip()
+            value = value.strip()
+            headers[key] = value
 
     return HttpRequest(method, uri, protocol, headers)
 
