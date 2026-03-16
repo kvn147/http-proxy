@@ -1,3 +1,4 @@
+import select
 import socket
 import sys
 import threading
@@ -101,6 +102,10 @@ def handle_connection(
                 # with no `Content-Length` headers.
                 http_request = deserialize_http_request(raw_request.decode())
 
+                if http_request.method == "CONNECT":
+                    handle_connect(client_socket, http_request.uri)
+                    return
+                
                 # Modify request to send to server.
                 address = get_address(http_request)
                 modified_request = modify_http_request(http_request)
@@ -111,6 +116,14 @@ def handle_connection(
                 # Forward request to server without buffering the body.
                 server_socket.connect(address)
                 server_socket.sendall(raw_modified_request)
+
+                while True:
+                    data = server_socket.recv(BUFFER_SIZE)
+                    if not data:
+                        break
+                    client_socket.sendall(data)
+
+                break
 
     except Exception as e:
         print(f"Error: {e}")
@@ -211,6 +224,48 @@ def get_address(http_request: HttpRequest) -> tuple[str, int]:
 
     return host, port
 
+def handle_connect(client_sock, target) -> None:
+    """Handle a CONNECT request
+    
+    Args:
+        client_sock: The client socket connected to.
+        target: The target host and port to connect to.
+    """
+    host, port = target.split(":", 1)
+    
+    remote = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        remote.connect((host, int(port)))
+
+        client_sock.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        # establish tunnel
+        tunnel(client_sock, remote)
+    except OSError as error:
+        client_sock.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+    finally:
+        client_sock.close()
+        remote.close()
+
+def tunnel(client_sock, remote) -> None:
+    """Establish a tunnel between the client and the remote server.
+    
+    Args:
+        client_sock: The client socket connected to.
+        remote: The remote socket connected to.
+    """
+    sockets = [client_sock, remote]
+    while True:
+        readable, _, _ = select.select(sockets, [], [])
+
+        for sock in readable:
+            data = sock.recv(BUFFER_SIZE)
+
+            if not data:
+                return
+            if sock is client_sock:
+                remote.sendall(data)
+            else:
+                client_sock.sendall(data)
 
 if __name__ == "__main__":
     run_tcp_server()
