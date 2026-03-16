@@ -102,6 +102,10 @@ def handle_connection(
                 # with no `Content-Length` headers.
                 http_request = deserialize_http_request(raw_request.decode())
 
+                if http_request.method == "CONNECT":
+                    handle_connect(client_socket, http_request.uri)
+                    return
+                
                 # Modify request to send to server.
                 address = get_address(http_request)
                 modified_request = modify_http_request(http_request)
@@ -112,6 +116,14 @@ def handle_connection(
                 # Forward request to server without buffering the body.
                 server_socket.connect(address)
                 server_socket.sendall(raw_modified_request)
+
+                while True:
+                    data = server_socket.recv(BUFFER_SIZE)
+                    if not data:
+                        break
+                    client_socket.sendall(data)
+
+                break
 
     except Exception as e:
         print(f"Error: {e}")
@@ -211,44 +223,6 @@ def get_address(http_request: HttpRequest) -> tuple[str, int]:
     port = int(raw_port) if separator else 80
 
     return host, port
-
-
-def seserialize_http_request(http_request: HttpRequest) -> str:
-    """Transform a `HttpRequest` into string format.
-
-    Args:
-        http_request: The request object to transform.
-    """
-    request_line = (
-        f"{http_request.method} {http_request.uri} {http_request.protocol}\r\n"
-    )
-    headers = "\r\n".join(
-        [f"{key}: {value}" for (key, value) in http_request.headers.items()]
-    )
-
-    return f"{request_line}{headers}\r\n\r\n"
-
-
-def get_address(http_request: HttpRequest) -> tuple[str, int]:
-    """Get the destination address (host, port) of a HTTP request.
-
-    Args:
-        http_request: A serialized HTTP request.
-    """
-    url_parts = urlsplit(http_request.uri)
-
-    if url_parts.hostname:
-        host = url_parts.hostname
-        port = url_parts.port or (443 if url_parts.scheme == "https" else 80)
-        return host, port
-
-    host_header = http_request.headers["host"]
-
-    host, separator, raw_port = host_header.partition(":")
-    port = int(raw_port) if separator else 80
-
-    return host, port
-
 
 def handle_connect(client_sock, target) -> None:
     """Handle a CONNECT request
