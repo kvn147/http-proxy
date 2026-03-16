@@ -116,6 +116,7 @@ def handle_connection(
         print(f"Error: {e}")
 
     finally:
+        client_socket.close()
         server_socket.close()
 
 
