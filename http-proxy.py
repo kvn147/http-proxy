@@ -23,7 +23,7 @@ def run_tcp_server():
     port = int(sys.argv[1])
 
     server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_sock.bind(("0.0.0.0", port))
+    server_sock.bind(("localhost", port))
     server_sock.listen()
 
     print(f"Listening to port: {port}")
@@ -37,20 +37,25 @@ def run_tcp_server():
         thread.start()
 
 
-def handle_connection(client_sock: socket.socket, client_addr: tuple[str, int]) -> None:
+def handle_connection(
+    client_socket: socket.socket, client_addr: tuple[str, int]
+) -> None:
     """Create a new TCP connection with the client.
 
-    TCP connection will be closed after one request-response cycle.
+    Invariant: One TCP connection per request-response.
+        This means that all listen to request from client -> forward request
+        to server -> listen to response from server -> forward response to
+        client will all belong in this thread.
 
     Args:
-        client_sock: The client socket connected to.
+        client_socket: The client socket connected to.
         client_addr: Address (IP, port) bound to the client socket.
     """
     buffer = ""
     http_request = None
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-    while bytes_read := client_sock.recv(BUFFER_SIZE):
+    while bytes_read := client_socket.recv(BUFFER_SIZE):
         buffer += bytes_read.decode()
 
         # HTTP request is built and we need the body.
@@ -65,8 +70,12 @@ def handle_connection(client_sock: socket.socket, client_addr: tuple[str, int]) 
             body = buffer[:content_length].encode()
             server_socket.sendall(body)
 
-            # Listen for response from server.
+            # Listen for response from server and forward to client.
+            while data := server_socket.recv(BUFFER_SIZE):
+                client_socket.sendall(data)
 
+            # Spec says: You keep forwarding data in this way, in each direction, until you detect that the source has closed the connection.
+            # Does this mean one TCP connection per request-responese???
             break
 
         else:
@@ -91,7 +100,8 @@ def handle_connection(client_sock: socket.socket, client_addr: tuple[str, int]) 
             server_socket.connect(address)
             server_socket.sendall(raw_modified_request)
 
-    client_sock.close()
+    client_socket.close()
+    server_socket.close()
 
 
 def modify_http_request(http_request: HttpRequest) -> HttpRequest:
@@ -124,7 +134,7 @@ def serialize_http_request(raw_request: str) -> HttpRequest:
     lines = raw_request.splitlines()
     request_line, *header_lines = lines
 
-    print(request_line)
+    print(f">>> {request_line}")
 
     method, uri, protocol = request_line.split()
 
@@ -164,22 +174,18 @@ def get_address(http_request: HttpRequest) -> tuple[str, int]:
         http_request: A serialized HTTP request.
     """
     url_parts = urlsplit(http_request.uri)
-    host = url_parts.netloc
-    port = 80
 
-    host, separator, raw_port = host.partition(":")
+    if url_parts.hostname:
+        host = url_parts.hostname
+        port = url_parts.port or (443 if url_parts.scheme == "https" else 80)
+        return host, port
 
-    if separator:
-        return (host, int(raw_port))
+    host_header = http_request.headers["Host"]
 
-    if "hostname" in http_request.headers:
-        port = int(http_request.headers["hostname"])
-    elif "ip" in http_request.headers:
-        port = int(http_request.headers["ip"])
-    elif url_parts.scheme == "https://":
-        port = 443
+    host, separator, raw_port = host_header.partition(":")
+    port = int(raw_port) if separator else 80
 
-    return (host, port)
+    return host, port
 
 
 if __name__ == "__main__":
