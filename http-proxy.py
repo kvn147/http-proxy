@@ -2,6 +2,7 @@ import socket
 import sys
 import threading
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 # This constant is the number of bytes read from TCP stream in each iteration.
 BUFFER_SIZE = 4096
@@ -9,7 +10,7 @@ BUFFER_SIZE = 4096
 
 @dataclass
 class HttpRequest:
-    """This type a HTTP request and contains its fields."""
+    """This type represents a HTTP request and contains its fields."""
 
     method: str
     uri: str
@@ -39,34 +40,34 @@ def run_tcp_server():
 def handle_connection(client_sock: socket.socket, client_addr: tuple[str, int]) -> None:
     """Create a new TCP connection with the client.
 
+    TCP connection will be closed after one request-response cycle.
+
     Args:
         client_sock: The client socket connected to.
         client_addr: Address (IP, port) bound to the client socket.
     """
     buffer = ""
     http_request = None
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-    while True:
-        bytes_read = client_sock.recv(BUFFER_SIZE).decode()
-
-        # Connection has been closed.
-        if bytes_read == 0:
-            return
-
-        buffer += bytes_read
+    while bytes_read := client_sock.recv(BUFFER_SIZE):
+        buffer += bytes_read.decode()
 
         # HTTP request is built and we need the body.
         if http_request:
             content_length = int(http_request.headers["Content-Length"])
 
+            # Right now we're buffering the entire body before sending it.
             if len(buffer) < content_length:
                 continue
 
-            body, buffer = buffer[:content_length], buffer[content_length:]
-            http_request = modify_http_request(http_request)
-            forward_http_request(http_request, body)
+            # Forward body to server.
+            body = buffer[:content_length].encode()
+            server_socket.sendall(body)
 
-            http_request = None
+            # Listen for response from server.
+
+            break
 
         else:
             # Request line + headers part of a HTTP request will end with \r\n\r\n.
@@ -81,15 +82,16 @@ def handle_connection(client_sock: socket.socket, client_addr: tuple[str, int]) 
             # with no `Content-Length` headers.
             http_request = serialize_http_request(raw_request)
 
+            # Modify request to send to server.
+            address = get_address(http_request)
+            modified_request = modify_http_request(http_request)
+            raw_modified_request = deserialize_http_request(modified_request).encode()
 
-def forward_http_request(http_request: HttpRequest, body: str):
-    """Forward a HTTP request to the server from the client.
+            # Forward request to server without buffering the body.
+            server_socket.connect(address)
+            server_socket.sendall(raw_modified_request)
 
-    Args:
-        http_request: The HTTP request.
-        body: The body of the request.
-    """
-    pass
+    client_sock.close()
 
 
 def modify_http_request(http_request: HttpRequest) -> HttpRequest:
@@ -139,15 +141,45 @@ def serialize_http_request(raw_request: str) -> HttpRequest:
     return HttpRequest(method, uri, protocol, headers)
 
 
-def deserialize_http_request(http_request: HttpRequest, body: str = "") -> str:
+def deserialize_http_request(http_request: HttpRequest) -> str:
     """Transform a `HttpRequest` into string format.
 
     Args:
         http_request: The request object to transform.
-        body: Optional body of the request.
     """
+    request_line = (
+        f"{http_request.method} {http_request.uri} {http_request.protocol}\r\n"
+    )
+    headers = "\r\n".join(
+        [f"{key}: {value}" for (key, value) in http_request.headers.items()]
+    )
 
-    return ""
+    return f"{request_line}{headers}\r\n"
+
+
+def get_address(http_request: HttpRequest) -> tuple[str, int]:
+    """Get the destination address (host, port) of a HTTP request.
+
+    Args:
+        http_request: A serialized HTTP request.
+    """
+    url_parts = urlsplit(http_request.uri)
+    host = url_parts.netloc
+    port = 80
+
+    host, separator, raw_port = host.partition(":")
+
+    if separator:
+        return (host, int(raw_port))
+
+    if "hostname" in http_request.headers:
+        port = int(http_request.headers["hostname"])
+    elif "ip" in http_request.headers:
+        port = int(http_request.headers["ip"])
+    elif url_parts.scheme == "https://":
+        port = 443
+
+    return (host, port)
 
 
 if __name__ == "__main__":
