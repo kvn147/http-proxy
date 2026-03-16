@@ -19,22 +19,30 @@ class HttpRequest:
 
 
 def run_tcp_server():
-    # maybe add base case to check the port from cli is valid
+    if len(sys.argv) != 2:
+        print("Usage: python proxy.py <port>")
+        sys.exit(1)
+
     port = int(sys.argv[1])
+
+    if not 0 <= port <= 65535:
+        print("Port must be between 0 and 65535")
+        sys.exit(1)
 
     server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_sock.bind(("localhost", port))
     server_sock.listen()
 
-    print(f"Listening to port: {port}")
+    try:
+        while True:
+            client_sock, client_addr = server_sock.accept()
 
-    while True:
-        client_sock, client_addr = server_sock.accept()
-
-        thread = threading.Thread(
-            target=handle_connection, args=(client_sock, client_addr)
-        )
-        thread.start()
+            thread = threading.Thread(
+                target=handle_connection, args=(client_sock, client_addr)
+            )
+            thread.start()
+    finally:
+        server_sock.close()
 
 
 def handle_connection(
@@ -51,57 +59,63 @@ def handle_connection(
         client_socket: The client socket connected to.
         client_addr: Address (IP, port) bound to the client socket.
     """
-    buffer = ""
+    buffer = b""
     http_request = None
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-    while bytes_read := client_socket.recv(BUFFER_SIZE):
-        buffer += bytes_read.decode()
+    try:
+        while bytes_read := client_socket.recv(BUFFER_SIZE):
+            buffer += bytes_read
 
-        # HTTP request is built and we need the body.
-        if http_request:
-            content_length = int(http_request.headers["Content-Length"])
+            # HTTP request is built and we need the body.
+            if http_request:
+                content_length = int(http_request.headers.get("content-length", 0))
 
-            # Right now we're buffering the entire body before sending it.
-            if len(buffer) < content_length:
-                continue
+                # Right now we're buffering the entire body before sending it.
+                if len(buffer) < content_length:
+                    continue
 
-            # Forward body to server.
-            body = buffer[:content_length].encode()
-            server_socket.sendall(body)
+                # Forward body to server.
+                body = buffer[:content_length]
+                server_socket.sendall(body)
 
-            # Listen for response from server and forward to client.
-            while data := server_socket.recv(BUFFER_SIZE):
-                client_socket.sendall(data)
+                # Listen for response from server and forward to client.
+                while data := server_socket.recv(BUFFER_SIZE):
+                    client_socket.sendall(data)
 
-            # Spec says: You keep forwarding data in this way, in each direction, until you detect that the source has closed the connection.
-            # Does this mean one TCP connection per request-responese???
-            break
+                # Spec says: You keep forwarding data in this way, in each direction, until you detect that the source has closed the connection.
+                # Does this mean one TCP connection per request-responese???
+                break
 
-        else:
-            # Request line + headers part of a HTTP request will end with \r\n\r\n.
-            raw_request, separator, remaining = buffer.partition("\r\n\r\n")
+            else:
+                # Request line + headers part of a HTTP request will end with \r\n\r\n.
+                raw_request, separator, remaining = buffer.partition(b"\r\n\r\n")
 
-            if not separator:
-                continue
+                if not separator:
+                    continue
 
-            buffer = remaining
+                buffer = remaining
 
-            # TODO: Gracefully handle parsing failures, including requests
-            # with no `Content-Length` headers.
-            http_request = serialize_http_request(raw_request)
+                # TODO: Gracefully handle parsing failures, including requests
+                # with no `Content-Length` headers.
+                http_request = serialize_http_request(raw_request.decode())
 
-            # Modify request to send to server.
-            address = get_address(http_request)
-            modified_request = modify_http_request(http_request)
-            raw_modified_request = deserialize_http_request(modified_request).encode()
+                # Modify request to send to server.
+                address = get_address(http_request)
+                modified_request = modify_http_request(http_request)
+                raw_modified_request = deserialize_http_request(
+                    modified_request
+                ).encode()
 
-            # Forward request to server without buffering the body.
-            server_socket.connect(address)
-            server_socket.sendall(raw_modified_request)
+                # Forward request to server without buffering the body.
+                server_socket.connect(address)
+                server_socket.sendall(raw_modified_request)
 
-    client_socket.close()
-    server_socket.close()
+    except Exception as e:
+        print(f"Error: {e}")
+
+    finally:
+        server_socket.close()
 
 
 def modify_http_request(http_request: HttpRequest) -> HttpRequest:
@@ -114,11 +128,11 @@ def modify_http_request(http_request: HttpRequest) -> HttpRequest:
     """
     headers = http_request.headers
 
-    if "Connection" in headers:
-        headers["Connection"] = "close"
+    if "connection" in headers:
+        headers["onnection"] = "close"
 
-    if "Proxy-connection" in headers:
-        headers["Proxy-connection"] = "close"
+    if "proxy-connection" in headers:
+        headers["proxy-connection"] = "close"
 
     http_request.protocol = "HTTP/1.0"
 
@@ -146,7 +160,7 @@ def serialize_http_request(raw_request: str) -> HttpRequest:
         if separator:
             key = key.strip()
             value = value.strip()
-            headers[key] = value
+            headers[key.strip().lower()] = value
 
     return HttpRequest(method, uri, protocol, headers)
 
@@ -180,7 +194,7 @@ def get_address(http_request: HttpRequest) -> tuple[str, int]:
         port = url_parts.port or (443 if url_parts.scheme == "https" else 80)
         return host, port
 
-    host_header = http_request.headers["Host"]
+    host_header = http_request.headers["host"]
 
     host, separator, raw_port = host_header.partition(":")
     port = int(raw_port) if separator else 80
