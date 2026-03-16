@@ -29,20 +29,21 @@ def run_tcp_server():
         print("Port must be between 0 and 65535")
         sys.exit(1)
 
-    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_sock.bind(("localhost", port))
-    server_sock.listen()
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_socket.bind(("localhost", port))
+    server_socket.listen()
 
     try:
         while True:
-            client_sock, client_addr = server_sock.accept()
+            client_sock, client_addr = server_socket.accept()
 
             thread = threading.Thread(
                 target=handle_connection, args=(client_sock, client_addr)
             )
             thread.start()
     finally:
-        server_sock.close()
+        server_socket.close()
 
 
 def handle_connection(
@@ -98,12 +99,12 @@ def handle_connection(
 
                 # TODO: Gracefully handle parsing failures, including requests
                 # with no `Content-Length` headers.
-                http_request = serialize_http_request(raw_request.decode())
+                http_request = deserialize_http_request(raw_request.decode())
 
                 # Modify request to send to server.
                 address = get_address(http_request)
                 modified_request = modify_http_request(http_request)
-                raw_modified_request = deserialize_http_request(
+                raw_modified_request = seserialize_http_request(
                     modified_request
                 ).encode()
 
@@ -129,17 +130,25 @@ def modify_http_request(http_request: HttpRequest) -> HttpRequest:
     headers = http_request.headers
 
     if "connection" in headers:
-        headers["onnection"] = "close"
+        headers["connection"] = "close"
 
     if "proxy-connection" in headers:
         headers["proxy-connection"] = "close"
 
     http_request.protocol = "HTTP/1.0"
 
+    url = urlsplit(http_request.uri)
+    path = url.path or "/"
+
+    if url.query:
+        path += "?" + url.query
+
+    http_request.uri = path
+
     return http_request
 
 
-def serialize_http_request(raw_request: str) -> HttpRequest:
+def deserialize_http_request(raw_request: str) -> HttpRequest:
     """Transform a raw string to a `HttpRequest`.
 
     Args:
@@ -165,7 +174,7 @@ def serialize_http_request(raw_request: str) -> HttpRequest:
     return HttpRequest(method, uri, protocol, headers)
 
 
-def deserialize_http_request(http_request: HttpRequest) -> str:
+def seserialize_http_request(http_request: HttpRequest) -> str:
     """Transform a `HttpRequest` into string format.
 
     Args:
@@ -178,7 +187,7 @@ def deserialize_http_request(http_request: HttpRequest) -> str:
         [f"{key}: {value}" for (key, value) in http_request.headers.items()]
     )
 
-    return f"{request_line}{headers}\r\n"
+    return f"{request_line}{headers}\r\n\r\n"
 
 
 def get_address(http_request: HttpRequest) -> tuple[str, int]:
