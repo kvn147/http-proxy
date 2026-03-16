@@ -1,0 +1,6 @@
+>>> CONNECT youtu.be:443 HTTP/1.1
+>>> CONNECT rr1---sn-nx57ynsk.c.youtube.com:443 HTTP/1.1
+>>> CONNECT rr5---sn-nx57ynsr.googlevideo.com:443 HTTP/1.1
+>>> CONNECT rr5---sn-nx57ynsr.googlevideo.com:443 HTTP/1.1
+>>> CONNECT rr1---sn-nx57ynsk.c.youtube.com:443 HTTP/1.1
+>>> CONNECT rr4---sn-nx57ynsr.googlevideo.com:443 HTTP/1.1

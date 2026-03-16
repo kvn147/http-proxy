@@ -1,0 +1,7 @@
+>>> CONNECT www.nytimes.com:443 HTTP/1.1
+>>> CONNECT static01.nyt.com:443 HTTP/1.1
+>>> CONNECT launchpad-wrapper.privacymanager.io:443 HTTP/1.1
+>>> CONNECT samizdat-graphql.nytimes.com:443 HTTP/1.1
+>>> CONNECT samizdat-graphql.nytimes.com:443 HTTP/1.1
+>>> CONNECT launchpad.privacymanager.io:443 HTTP/1.1
+>>> CONNECT a.nytimes.com:443 HTTP/1.1
