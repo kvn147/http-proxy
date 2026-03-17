@@ -19,6 +19,95 @@ class HttpRequest:
     headers: dict[str, str]
 
 
+def split_http_header(buffer: bytes) -> tuple[bytes, bytes] | None:
+    """Split a HTTP message into header bytes and remaining bytes.
+
+    Accept either CRLFCRLF or LFLF for terminating.
+
+    Args:
+        buffer: The bytes to split.
+    """
+    crlf_index = buffer.find(b"\r\n\r\n")
+    lf_index = buffer.find(b"\n\n")
+
+    if crlf_index == -1 and lf_index == -1:
+        return None
+
+    if crlf_index != -1 and (lf_index == -1 or crlf_index <= lf_index):
+        separator_len = 4
+        split_index = crlf_index
+    else:
+        separator_len = 2
+        split_index = lf_index
+
+    return buffer[:split_index], buffer[split_index + separator_len :]
+
+
+def force_close_headers(headers: dict[str, str]) -> None:
+    """Force non-persistent HTTP connection headers.
+
+    Args:
+        headers: The HTTP headers to modify in-place.
+    """
+    headers["connection"] = "close"
+    headers["proxy-connection"] = "close"
+    headers.pop("keep-alive", None)
+
+
+def deserialize_http_response(raw_response: str) -> tuple[str, dict[str, str]]:
+    """Transform a raw response header to status line and headers.
+    
+    """
+    lines = raw_response.splitlines()
+    status_line, *header_lines = lines
+
+    headers = {}
+    for header_line in header_lines:
+        key, separator, value = header_line.partition(":")
+        if separator:
+            headers[key.strip().lower()] = value.strip()
+
+    return status_line, headers
+
+
+def serialize_http_response(status_line: str, headers: dict[str, str]) -> str:
+    """Transform response line + headers into raw header text.
+    
+    """
+    headers_text = "\r\n".join([f"{key}: {value}" for (key, value) in headers.items()])
+    return f"{status_line}\r\n{headers_text}\r\n\r\n"
+
+
+def forward_response(server_socket: socket.socket, client_socket: socket.socket) -> None:
+    """Forward response while rewriting connection headers to close.
+
+    """
+    buffer = b""
+
+    while True:
+        header_split = split_http_header(buffer)
+        if header_split:
+            raw_header, remaining = header_split
+            status_line, headers = deserialize_http_response(raw_header.decode())
+            force_close_headers(headers)
+
+            modified_header = serialize_http_response(status_line, headers).encode()
+            client_socket.sendall(modified_header)
+            if remaining:
+                client_socket.sendall(remaining)
+            break
+
+        data = server_socket.recv(BUFFER_SIZE)
+        if not data:
+            if buffer:
+                client_socket.sendall(buffer)
+            return
+        buffer += data
+
+    while data := server_socket.recv(BUFFER_SIZE):
+        client_socket.sendall(data)
+
+
 def run_tcp_server():
     if len(sys.argv) != 2:
         print("Usage: python proxy.py <port>")
@@ -69,61 +158,54 @@ def handle_connection(
         while bytes_read := client_socket.recv(BUFFER_SIZE):
             buffer += bytes_read
 
-            # HTTP request is built and we need the body.
-            if http_request:
-                content_length = int(http_request.headers.get("content-length", 0))
+            # Keep reading until we have the full HTTP header.
+            header_split = split_http_header(buffer)
+            if not header_split:
+                continue
 
-                # Right now we're buffering the entire body before sending it.
-                if len(buffer) < content_length:
-                    continue
+            raw_request, buffer = header_split
 
-                # Forward body to server.
-                body = buffer[:content_length]
+            # TODO: Gracefully handle parsing failures, including requests
+            # with no `Content-Length` headers.
+            http_request = deserialize_http_request(raw_request.decode())
+
+            if http_request.method == "CONNECT":
+                handle_connect(client_socket, http_request.uri)
+                return
+            
+            # Modify request to send to server.
+            address = get_address(http_request)
+            modified_request = modify_http_request(http_request)
+            raw_modified_request = seserialize_http_request(
+                modified_request
+            ).encode()
+
+            # Forward request to server without buffering the body.
+            server_socket.connect(address)
+            server_socket.sendall(raw_modified_request)
+
+            content_length = int(http_request.headers.get("content-length", 0))
+
+            # Forward any body bytes that were already read along with the header.
+            body = buffer[:content_length]
+            if body:
                 server_socket.sendall(body)
 
-                # Listen for response from server and forward to client.
-                while data := server_socket.recv(BUFFER_SIZE):
-                    client_socket.sendall(data)
+            bytes_sent = len(body)
 
-                # Spec says: You keep forwarding data in this way, in each direction, until you detect that the source has closed the connection.
-                # Does this mean one TCP connection per request-responese???
-                break
+            # Continue streaming the rest of the body, if any.
+            while bytes_sent < content_length:
+                chunk = client_socket.recv(BUFFER_SIZE)
+                if not chunk:
+                    break
+                remaining = content_length - bytes_sent
+                to_send = chunk[:remaining]
+                server_socket.sendall(to_send)
+                bytes_sent += len(to_send)
 
-            else:
-                # Request line + headers part of a HTTP request will end with \r\n\r\n.
-                raw_request, separator, remaining = buffer.partition(b"\r\n\r\n")
-
-                if not separator:
-                    continue
-
-                buffer = remaining
-
-                # TODO: Gracefully handle parsing failures, including requests
-                # with no `Content-Length` headers.
-                http_request = deserialize_http_request(raw_request.decode())
-
-                if http_request.method == "CONNECT":
-                    handle_connect(client_socket, http_request.uri)
-                    return
-                
-                # Modify request to send to server.
-                address = get_address(http_request)
-                modified_request = modify_http_request(http_request)
-                raw_modified_request = seserialize_http_request(
-                    modified_request
-                ).encode()
-
-                # Forward request to server without buffering the body.
-                server_socket.connect(address)
-                server_socket.sendall(raw_modified_request)
-
-                while True:
-                    data = server_socket.recv(BUFFER_SIZE)
-                    if not data:
-                        break
-                    client_socket.sendall(data)
-
-                break
+            # Now forward the response exactly once.
+            forward_response(server_socket, client_socket)
+            break
 
     except Exception as e:
         print(f"Error: {e}")
@@ -142,12 +224,7 @@ def modify_http_request(http_request: HttpRequest) -> HttpRequest:
         http_request: The request to transform.
     """
     headers = http_request.headers
-
-    if "connection" in headers:
-        headers["connection"] = "close"
-
-    if "proxy-connection" in headers:
-        headers["proxy-connection"] = "close"
+    force_close_headers(headers)
 
     http_request.protocol = "HTTP/1.0"
 
@@ -224,6 +301,7 @@ def get_address(http_request: HttpRequest) -> tuple[str, int]:
 
     return host, port
 
+
 def handle_connect(client_sock, target) -> None:
     """Handle a CONNECT request
     
@@ -243,8 +321,8 @@ def handle_connect(client_sock, target) -> None:
     except OSError as error:
         client_sock.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
     finally:
-        client_sock.close()
         remote.close()
+
 
 def tunnel(client_sock, remote) -> None:
     """Establish a tunnel between the client and the remote server.
@@ -266,6 +344,7 @@ def tunnel(client_sock, remote) -> None:
                 remote.sendall(data)
             else:
                 client_sock.sendall(data)
+
 
 if __name__ == "__main__":
     run_tcp_server()
